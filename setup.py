@@ -20,7 +20,7 @@ setuptools.setup(
         "pyclesperanto-prototype>=0.8.0",
         "pandas",
         "leidenalg",
-       "napari-skimage-regionprops,"
+        "napari-skimage-regionprops",
         "napari[all]",
         "numba>=0.55.2",
         "pyclesperanto-prototype",

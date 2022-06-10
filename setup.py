@@ -23,12 +23,10 @@ setuptools.setup(
        "napari-skimage-regionprops,"
         "napari[all]",
         "numba>=0.55.2",
-        "numpy",
         "pyclesperanto-prototype",
         "pymeshfix",
         "scanpy",
         "scikit-image>0.19.0",
-        "scikit-learn",
         "tqdm",
         "trimesh[easy]",
     ],

@@ -43,7 +43,6 @@ def test_expand_selected_labels_2d():
     assert np.sum(expanded_image_2 == 2) == 10 ** 2
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
 def test_expand_selected_labels_3d():
     label_image = np.zeros((100, 100, 100), dtype=int)
     label_image[30:70, 30:70, 30:70] = 1
@@ -71,7 +70,6 @@ def test_expand_selected_labels_3d():
     assert np.sum(expanded_image_2 == 2) == 10 ** 3
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
 def test_expand_selected_labels_4d():
     """Should raise a value error with label ndim > 3"""
     label_image = np.zeros((10, 10, 10, 10), dtype=int)
@@ -82,7 +80,6 @@ def test_expand_selected_labels_4d():
         )
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
 def test_expand_selected_labels_background_mask_2d():
     label_image = np.zeros((100, 100), dtype=int)
     label_image[49:51, 49:51] = 2
@@ -104,7 +101,6 @@ def test_expand_selected_labels_background_mask_2d():
     assert np.sum(expanded_image == 2) == 10 ** 2
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
 def test_expand_selected_labels_background_mask_3d():
     label_image = np.zeros((100, 100, 100), dtype=int)
     label_image[49:51, 49:51, 49:51] = 2
@@ -162,7 +158,6 @@ def test_expand_bounding_box_with_clipping():
     np.testing.assert_equal(expanded_bounding_box, expected_bounding_box)
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
 def test_expand_selected_labels_using_crop_3d():
     label_image = np.zeros((100, 100, 100), dtype=int)
     label_image[30:70, 30:70, 30:70] = 1

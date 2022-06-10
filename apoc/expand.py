@@ -1,194 +1,246 @@
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 import pyclesperanto_prototype as cle
-import pytest
-
-from morphometrics.label.image_utils import (
-    expand_bounding_box,
-    expand_selected_labels,
-    expand_selected_labels_using_crop,
-    get_mask_bounding_box_3d,
-)
-from morphometrics.utils.environment_utils import on_ci
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_2d():
-    label_image = np.zeros((100, 100), dtype=int)
-    label_image[30:70, 30:70] = 1
-    label_image[45:55, 45:55] = 0
+def expand_selected_labels(
+    label_image: np.ndarray,
+    label_values_to_expand: Union[int, List[int]],
+    expansion_amount: int = 1,
+    background_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Expand selected label values in a label image.
 
-    label_image[49:51, 49:51] = 2
+    Parameters
+    ----------
+    label_image : LabelImage
+        The label image to expand selected values in. Must be 2D or 3D.
+    label_values_to_expand : Union[int, List[int]]
+        The values in the label image that are allowed to expand.
+    expansion_amount : int
+        The radius of the expansion. Expansion is performed with equal
+        amounts in all directions.
+    background_mask : Optional[np.ndarray]
+        A boolean mask where True denotes background into which the labels
+        cannot be expanded. If None, the background mask is not applied.
+        Default value is None
 
-    expanded_image = expand_selected_labels(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=1
-    )
+    Returns
+    -------
+    expanded_label_image : LabelImage
+        The resulting label image with the selected labels expanded.
+    """
 
-    # check that the unexpanded labels were not expanded
-    np.testing.assert_equal(label_image.shape, expanded_image.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image == 1)
-    cpu_devices = cle.available_device_names(dev_type="cpu")
-    print("Available CPU OpenCL devices:" + str(cpu_devices))
+    if isinstance(label_values_to_expand, int):
+        # coerce into list
+        label_values_to_expand = [label_values_to_expand]
 
-    assert expanded_image[50, 52] == 2
+    if label_image.ndim == 2:
+        label_image_is_2d = True
+        label_image = np.expand_dims(label_image, axis=0)
+    elif label_image.ndim == 3:
+        label_image_is_2d = False
+    else:
+        raise ValueError("label_image must be 2D or 3D")
 
-    # expand to fill the void
-    expanded_image_2 = expand_selected_labels(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=5
-    )
-    np.testing.assert_equal(label_image.shape, expanded_image_2.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image_2 == 1)
+    gpu_labels = cle.push(label_image)
 
-    # check that the entire void was filled with 2
-    assert np.sum(expanded_image_2 == 2) == 10 ** 2
+    # preallocate the memory
+    flip = cle.create_labels_like(gpu_labels)
+    flop = cle.create_labels_like(gpu_labels)
+    flap = cle.create_labels_like(gpu_labels)
+    labels_mask = cle.create_labels_like(gpu_labels)
+    expanded_labels = cle.create_labels_like(gpu_labels)
 
+    image_changed_flag = cle.create([1, 1, 1])
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_3d():
-    label_image = np.zeros((100, 100, 100), dtype=int)
-    label_image[30:70, 30:70, 30:70] = 1
-    label_image[45:55, 45:55, 45:55] = 0
+    # create a mask where the pixels the are allowed to expand are set to True
+    expand_mask = cle.create_binary_like(gpu_labels)
+    cle.equal_constant(gpu_labels, expand_mask, 0)
 
-    label_image[49:51, 49:51, 49:51] = 2
+    # create a label image containing only the labels that are allowed to expand
+    for label_value in label_values_to_expand:
+        cle.equal_constant(gpu_labels, labels_mask, label_value)
+        cle.binary_or(expand_mask, labels_mask, expand_mask)
 
-    expanded_image = expand_selected_labels(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=1
-    )
+    # create the labels to expand
+    cle.multiply_images(gpu_labels, expand_mask, flip)
 
-    np.testing.assert_equal(label_image.shape, expanded_image.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image == 1)
+    # perform the expansion
+    for i in range(expansion_amount):
+        # dilate the labels
+        cle.onlyzero_overwrite_maximum_box(flip, image_changed_flag, flop)
+        cle.onlyzero_overwrite_maximum_diamond(flop, image_changed_flag, flap)
 
-    assert expanded_image[50, 52, 50] == 2
+        # remove the expansion that occurred where other labels already are
+        cle.multiply_images(flap, expand_mask, flip)
 
-    # expand to fill the void
-    expanded_image_2 = expand_selected_labels(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=5
-    )
-    np.testing.assert_equal(label_image.shape, expanded_image_2.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image_2 == 1)
+    # insert the expanded labels back into the original image
+    cle.binary_not(expand_mask, labels_mask)
+    cle.multiply_images(gpu_labels, labels_mask, expanded_labels)
+    cle.add_images(expanded_labels, flip, expanded_labels)
 
-    # check that the entire void was filled with 2
-    assert np.sum(expanded_image_2 == 2) == 10 ** 3
+    expanded_label_image = np.asarray(expanded_labels)
+    if label_image_is_2d is True:
+        expanded_label_image = np.squeeze(expanded_label_image)
 
+    # trim off the expansion that went outside of the tissue
+    if background_mask is not None:
+        expanded_label_image[background_mask] = 0
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_4d():
-    """Should raise a value error with label ndim > 3"""
-    label_image = np.zeros((10, 10, 10, 10), dtype=int)
-
-    with pytest.raises(ValueError):
-        _ = expand_selected_labels(
-            label_image=label_image, label_values_to_expand=2, expansion_amount=1
-        )
-
-
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_background_mask_2d():
-    label_image = np.zeros((100, 100), dtype=int)
-    label_image[49:51, 49:51] = 2
-
-    background_mask = np.ones_like(label_image, dtype=bool)
-    background_mask[45:55, 45:55] = 0
-
-    expanded_image = expand_selected_labels(
-        label_image=label_image,
-        label_values_to_expand=2,
-        expansion_amount=10,
-        background_mask=background_mask,
-    )
-
-    # check that the shape was preserved
-    np.testing.assert_equal(label_image.shape, expanded_image.shape)
-
-    # check that label 2 was only expanded to the edge of the boundary mask
-    assert np.sum(expanded_image == 2) == 10 ** 2
+    return expanded_label_image
 
 
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_background_mask_3d():
-    label_image = np.zeros((100, 100, 100), dtype=int)
-    label_image[49:51, 49:51, 49:51] = 2
+def expand_selected_labels_using_crop(
+    label_image: np.ndarray,
+    label_values_to_expand: Union[int, List[int]],
+    expansion_amount: int = 1,
+    background_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Expand selected label values in a label image by cropping out the bounding box
+    surrounding the selected labels and performing the expansion on the crop.
 
-    background_mask = np.ones_like(label_image, dtype=bool)
-    background_mask[45:55, 45:55, 45:55] = 0
+    Parameters
+    ----------
+    label_image : LabelImage
+        The label image to expand selected values in. Must be 2D or 3D.
+    label_values_to_expand : Union[int, List[int]]
+        The values in the label image that are allowed to expand.
+    expansion_amount : int
+        The radius of the expansion. Expansion is performed with equal
+        amounts in all directions.
+    background_mask : Optional[np.ndarray]
+        A boolean mask where True denotes background into which the labels
+        cannot be expanded. If None, the background mask is not applied.
+        Default value is None
 
-    expanded_image = expand_selected_labels(
-        label_image=label_image,
-        label_values_to_expand=2,
-        expansion_amount=10,
-        background_mask=background_mask,
-    )
+    Returns
+    -------
+    expanded_label_image : LabelImage
+        The resulting label image with the selected labels expanded.
+    """
+    if isinstance(label_values_to_expand, int):
+        # coerce int to list
+        label_values_to_expand = [label_values_to_expand]
+    label_mask = np.zeros_like(label_image, dtype=bool)
+    for label_value in label_values_to_expand:
+        label_mask = np.logical_or(label_mask, label_image == label_value)
 
-    # check that the shape was preserved
-    np.testing.assert_equal(label_image.shape, expanded_image.shape)
-
-    # check that label 2 was only expanded to the edge of the boundary mask
-    assert np.sum(expanded_image == 2) == 10 ** 3
-
-
-def test_get_mask_bounding_box_3d():
-    mask_indices = np.array([[20, 30], [22, 32], [34, 44]])
-    expected_bounding_box = mask_indices.copy()
-    expected_bounding_box[:, 1] = expected_bounding_box[:, 1] - 1
-
-    mask_image = np.zeros((50, 50, 50), dtype=int)
-    mask_image[
-        mask_indices[0, 0] : mask_indices[0, 1],
-        mask_indices[1, 0] : mask_indices[1, 1],
-        mask_indices[2, 0] : mask_indices[2, 1],
-    ] = 1
-
-    bounding_box = get_mask_bounding_box_3d(mask_image)
-    np.testing.assert_allclose(bounding_box, expected_bounding_box)
-    assert bounding_box.dtype == np.int
-
-
-def test_expand_bounding_box():
-    bounding_box = np.array([[10, 20], [30, 40], [50, 60]])
-    expected_bounding_box = np.array([[7, 23], [27, 43], [47, 63]])
+    if expansion_amount > 1:
+        bounding_box_expansion = 2 * expansion_amount
+    else:
+        # when expansion is 1, actual radius ends up being 3
+        bounding_box_expansion = 4
+    bounding_box = get_mask_bounding_box_3d(label_mask)
     expanded_bounding_box = expand_bounding_box(
-        bounding_box=bounding_box, expansion_amount=3
-    )
-    np.testing.assert_equal(expanded_bounding_box, expected_bounding_box)
-
-
-def test_expand_bounding_box_with_clipping():
-    """Test that the bounding box is properly clipped to the image shape"""
-    bounding_box = np.array([[2, 20], [30, 40], [50, 60]])
-    expected_bounding_box = np.array([[0, 23], [27, 43], [47, 60]])
-    expanded_bounding_box = expand_bounding_box(
-        bounding_box=bounding_box, expansion_amount=3, image_shape=(61, 61, 61)
-    )
-    np.testing.assert_equal(expanded_bounding_box, expected_bounding_box)
-
-
-@pytest.mark.skipif(on_ci, reason="openCL tests not working on CI")
-def test_expand_selected_labels_using_crop_3d():
-    label_image = np.zeros((100, 100, 100), dtype=int)
-    label_image[30:70, 30:70, 30:70] = 1
-    label_image[45:55, 45:55, 45:55] = 0
-    label_image[49:51, 49:51, 49:51] = 2
-    label_image[0, 0, 90:100] = 3
-
-    expanded_image = expand_selected_labels(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=1
+        bounding_box=bounding_box,
+        expansion_amount=bounding_box_expansion,
+        image_shape=label_image.shape,
     )
 
-    np.testing.assert_equal(label_image.shape, expanded_image.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image == 1)
+    # extract a crop around the bounding box of the labels
+    expansion_crop = label_image[
+        expanded_bounding_box[0, 0] : expanded_bounding_box[0, 1],
+        expanded_bounding_box[1, 0] : expanded_bounding_box[1, 1],
+        expanded_bounding_box[2, 0] : expanded_bounding_box[2, 1],
+    ]
 
-    assert expanded_image[50, 52, 50] == 2
+    if background_mask is not None:
+        # crop the background mask
+        background_mask_crop = background_mask[
+            expanded_bounding_box[0, 0] : expanded_bounding_box[0, 1],
+            expanded_bounding_box[1, 0] : expanded_bounding_box[1, 1],
+            expanded_bounding_box[2, 0] : expanded_bounding_box[2, 1],
+        ]
+    else:
+        background_mask_crop = None
 
-    # expand to fill the void
-    expanded_image_2 = expand_selected_labels_using_crop(
-        label_image=label_image, label_values_to_expand=2, expansion_amount=5
+    expanded_crop = expand_selected_labels(
+        label_image=expansion_crop,
+        label_values_to_expand=label_values_to_expand,
+        expansion_amount=expansion_amount,
+        background_mask=background_mask_crop,
     )
-    np.testing.assert_equal(label_image.shape, expanded_image_2.shape)
-    np.testing.assert_equal(label_image == 1, expanded_image_2 == 1)
 
-    # check that the entire void was filled with 2
-    assert np.sum(expanded_image_2 == 2) == 10 ** 3
+    # insert the expanded labels back into the original image
+    expanded_labels = label_image.copy()
+    expanded_labels[
+        expanded_bounding_box[0, 0] : expanded_bounding_box[0, 1],
+        expanded_bounding_box[1, 0] : expanded_bounding_box[1, 1],
+        expanded_bounding_box[2, 0] : expanded_bounding_box[2, 1],
+    ] = expanded_crop
 
-    # test that the bounding box doesn't extend beyond the image
-    _ = expand_selected_labels_using_crop(
-        label_image=label_image, label_values_to_expand=3, expansion_amount=5
-    )
+    return expanded_labels
+
+
+def get_mask_bounding_box_3d(mask_image: np.ndarray) -> np.ndarray:
+    """Get the axis-aligned bounding box around the True values in a 3D mask.
+
+    Parameters
+    ----------
+    mask_image : BinaryImage
+        The binary image from which to calculate the bounding box.
+
+    Returns
+    -------
+    bounding_box : np.ndarray
+        The bounding box as an array where arranged:
+            [
+                [0_min, _max],
+                [1_min, 1_max],
+                [2_min, 2_max]
+            ]
+        where 0, 1, and 2 are the 0th, 1st, and 2nd dimensions,
+        respectively.
+    """
+    z = np.any(mask_image, axis=(1, 2))
+    y = np.any(mask_image, axis=(0, 2))
+    x = np.any(mask_image, axis=(0, 1))
+
+    z_min, z_max = np.where(z)[0][[0, -1]]
+    y_min, y_max = np.where(y)[0][[0, -1]]
+    x_min, x_max = np.where(x)[0][[0, -1]]
+
+    return np.array([[z_min, z_max], [y_min, y_max], [x_min, x_max]], dtype=int)
+
+
+def expand_bounding_box(
+    bounding_box: np.ndarray,
+    expansion_amount: int,
+    image_shape: Optional[Tuple[int]] = None,
+) -> np.ndarray:
+    """Expand a bounding box bidirectionally along each axis by a specified amount.
+
+    Parameters
+    ----------
+    bounding_box : np.ndarray
+        The bounding box as an array where arranged:
+            [
+                [0_min, _max],
+                [1_min, 1_max],
+                [2_min, 2_max]
+            ]
+        where 0, 1, and 2 are the 0th, 1st, and 2nd dimensions,
+        respectively.
+    expansion_amount : int
+        The number of pixels to expand the bounding box by in each direction
+    image_shape : Tuple[int]
+        The size of the image along each axis.
+
+    Returns
+    -------
+    expanded_bounding_box : np.ndarray
+        The expanded bounding box.
+    """
+    expanded_bounding_box = bounding_box.copy()
+    expanded_bounding_box[:, 0] = expanded_bounding_box[:, 0] - expansion_amount
+    expanded_bounding_box[:, 1] = expanded_bounding_box[:, 1] + expansion_amount
+
+    if image_shape is not None:
+        # max index is image_shape - 1
+        max_value = np.asarray(image_shape).reshape((3, 1)) - 1
+    else:
+        max_value = None
+
+    return np.clip(expanded_bounding_box, a_min=0, a_max=max_value)

@@ -29,6 +29,9 @@ setuptools.setup(
         "scikit-image>0.19.0",
         "tqdm",
         "trimesh[easy]",
+        "pre-commit",
+        "pytest",
+        "pytest-qt"
     ],
     python_requires='>=3.6',
     classifiers=[
